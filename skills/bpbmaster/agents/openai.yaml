@@ -1,0 +1,3 @@
+interface:
+  display_name: "bpbmaster"
+  short_description: "通过本地 MCP 游玩背包乱斗休闲局，优化购买与摆放并争取存活十八回合"

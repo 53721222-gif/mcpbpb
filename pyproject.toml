@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bpb-mcp"
+version = "0.1.0"
+description = "Backpack Battles MCP server: expose game state and actions to LLMs"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "mcpbpb"}]
+dependencies = []
+
+[project.scripts]
+bpb-mcp = "bpb_mcp.cli:main"
+bpb-mcp-server = "bpb_mcp.server:main"
+
+[tool.setuptools]
+packages = ["bpb_mcp"]
