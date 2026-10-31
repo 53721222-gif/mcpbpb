@@ -289,6 +289,20 @@ func _validate_item_target(inv, cells, item):
 			return "overlaps_item"
 	return ""
 
+func _validate_rotation_item_target(inv, cells, item):
+	var size = inv.inventorySize
+	var w = int(size.x)
+	var h = int(size.y)
+	for c in cells:
+		if c.x < 0 or c.y < 0 or c.x >= w or c.y >= h:
+			return "out_of_bounds"
+		if not inv.bagCells.has(c):
+			return "not_in_bag"
+		var other_item = inv.filledCells.get(c, null)
+		if is_instance_valid(other_item) and other_item != item:
+			return "overlaps_item"
+	return ""
+
 func _validate_bag_target(inv, cells, bag):
 	# Bags may be moved over fixed items (the items become covered by the bag).
 	# Only other bags block the move.
@@ -501,6 +515,10 @@ func _item_info(ctx, it, inv):
 	d["rarity"] = str(it.getTranslatedRarity())
 	d["script"] = str(it.get_script().resource_path) if it.get_script() != null else ""
 	d["is_bag"] = bool(it.isBag())
+	d["is_gem"] = bool(it.isGem())
+	d["sockets"] = _socket_list(it, inv)
+	d["fusion_locked"] = bool(it.isLocked())
+	d["locked"] = bool(it.isLocked())
 	d["rotation"] = int(it.getFaceDirection())
 	d["description"] = str(it.getDescription()).substr(0, 400)
 	var size = it.getSizeInCells()
@@ -517,6 +535,7 @@ func _item_info(ctx, it, inv):
 	if cells.size() > 0:
 		d["top_left"] = _pair(_min_cell(cells))
 		d["cells"] = _cells_array(cells)
+		d["shape"] = _cells_array(_normalize_cells(cells))
 		d["in_one_bag"] = _item_in_one_bag(inv, it)
 		var center = _bbox_center(inv, cells)
 		var diff = it.global_position - center
@@ -586,13 +605,22 @@ func _backpack_state(ctx, inv):
 	var outside = 0
 	var invalid = 0
 	var floating = 0
+	var fusion_locked = 0
 	for d in items:
 		if bool(d.get("outside_bag", false)):
 			outside += 1
 		if bool(d.get("floating", false)):
 			floating += 1
+		if bool(d.get("fusion_locked", false)):
+			fusion_locked += 1
+	var socketed_gems = 0
+	for owned in _owned_items(ctx):
+		if is_instance_valid(owned):
+			socketed_gems += owned.getGemsNoNull().size()
 	return {"width": w, "height": h, "bags": bags, "items": items, "grid": grid,
-		"outside_count": outside, "invalid_count": invalid, "floating_count": floating}
+		"outside_count": outside, "invalid_count": invalid, "floating_count": floating,
+		"fusion_locked_count": fusion_locked,
+		"socketed_gems_count": socketed_gems}
 
 func _commit(g):
 	# The game writes the run state itself at shop/round transitions. Forcing
@@ -908,6 +936,136 @@ func sell_item(ctx, args):
 		"sell_price": price, "gold_before": gold_before, "gold": int(g.gold),
 		"gold_gained": int(g.gold) - gold_before}
 
+func set_fusion_lock(ctx, args):
+	var g = _game(ctx)
+	var inv = _inv(ctx)
+	if g == null or inv == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var guard = _not_in_shop(g)
+	if guard != null:
+		return guard
+	_normalize(ctx)
+	var it = _find_item(ctx, args)
+	if it == null:
+		return {"ok": false, "error": "item_not_found"}
+	if it.isBag():
+		return {"ok": false, "error": "bag_not_lockable",
+			"detail": "fusion lock applies to items, not bags"}
+	var owner = int(it.ownerType)
+	if owner != 1 and owner != 2:
+		return {"ok": false, "error": "item_not_owned",
+			"detail": "only backpack/storage items can be fusion-locked"}
+	if bool(it.get("fusing")):
+		return {"ok": false, "error": "item_is_fusing"}
+	var desired = true
+	if args.has("locked"):
+		var lv = args.get("locked")
+		if typeof(lv) == TYPE_BOOL:
+			desired = bool(lv)
+		else:
+			desired = str(lv).to_lower() in ["1", "true", "yes", "on"]
+	var before = bool(it.isLocked())
+	var changed = false
+	if before != desired:
+		# setLocked is the game's own toggle: it updates locked, removes/adds
+		# the item from CraftingManager, refreshes previews and plays the
+		# lock/unlock animation. Do not mutate `locked` directly.
+		it.setLocked(desired, true)
+		changed = true
+	var after = bool(it.isLocked())
+	return {"ok": true, "item_id": int(it.get_instance_id()),
+		"name": str(it.getName()), "name_localized": str(it.getTranslatedName()),
+		"previous_fusion_locked": before, "fusion_locked": after,
+		"locked": after, "changed": changed,
+		"in_storage": _in_storage(_storage(ctx), it)}
+
+func socket_gem(ctx, args):
+	var g = _game(ctx)
+	var inv = _inv(ctx)
+	var st = _storage(ctx)
+	if g == null or inv == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var guard = _not_in_shop(g)
+	if guard != null:
+		return guard
+	_normalize(ctx)
+	var host = _find_item(ctx, {"item_id": int(args.get("host_id", -1))})
+	var gem = _find_item(ctx, {"item_id": int(args.get("gem_id", -1))})
+	if host == null or gem == null:
+		return {"ok": false, "error": "item_not_found"}
+	if host == gem:
+		return {"ok": false, "error": "same_item"}
+	if host.isGem():
+		return {"ok": false, "error": "host_is_gem"}
+	if not host.hasSockets():
+		return {"ok": false, "error": "no_sockets"}
+	var socks = host.get("sockets")
+	if socks == null or typeof(socks) != TYPE_ARRAY or socks.size() == 0:
+		return {"ok": false, "error": "no_sockets"}
+	var idx = int(args.get("socket_index", 0))
+	if idx < 0 or idx >= socks.size():
+		return {"ok": false, "error": "socket_index_invalid", "socket_count": socks.size()}
+	if not gem.isGem():
+		return {"ok": false, "error": "not_a_gem"}
+	if gem.get("socket") != null:
+		return {"ok": false, "error": "gem_already_socketed"}
+	if is_instance_valid(socks[idx].get("gem")):
+		return {"ok": false, "error": "socket_occupied",
+			"detail": "unsocket the current gem first"}
+	var gem_id = int(gem.get_instance_id())
+	var gem_name = str(gem.getName())
+	if _in_storage(st, gem):
+		st.removeItem(gem)
+	else:
+		inv.removeItem(gem)
+	if is_instance_valid(gem):
+		gem.set("placedByPlayer", true)
+		host.setGem(idx, gem)
+		gem.global_position = socks[idx].global_position
+		gem.rotation = host.rotation
+		_commit(g)
+		return {"ok": true, "socketed": true, "host_id": int(host.get_instance_id()),
+			"host_name": str(host.getName()), "gem_id": gem_id, "gem_name": gem_name,
+			"socket_index": idx, "sockets": _socket_list(host, inv)}
+	return {"ok": false, "error": "gem_freed_during_socket"}
+
+func unsocket_gem(ctx, args):
+	var g = _game(ctx)
+	var inv = _inv(ctx)
+	var st = _storage(ctx)
+	if g == null or inv == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var guard = _not_in_shop(g)
+	if guard != null:
+		return guard
+	_normalize(ctx)
+	var host = _find_item(ctx, {"item_id": int(args.get("host_id", -1))})
+	if host == null:
+		return {"ok": false, "error": "item_not_found"}
+	var socks = host.get("sockets")
+	if socks == null or typeof(socks) != TYPE_ARRAY or socks.size() == 0:
+		return {"ok": false, "error": "no_sockets"}
+	var idx = int(args.get("socket_index", 0))
+	if idx < 0 or idx >= socks.size():
+		return {"ok": false, "error": "socket_index_invalid", "socket_count": socks.size()}
+	var gem = socks[idx].get("gem")
+	if not is_instance_valid(gem):
+		return {"ok": false, "error": "socket_empty"}
+	var gem_id = int(gem.get_instance_id())
+	var gem_name = str(gem.getName())
+	gem.unsocket()
+	if is_instance_valid(gem):
+		gem.set("placedByPlayer", true)
+		var added = inv.addItemWherePossible(gem)
+		if not added:
+			gem.pushToStorage(Game.STORAGEBOX.center)
+		_commit(g)
+		return {"ok": true, "unsocketed": true, "host_id": int(host.get_instance_id()),
+			"host_name": str(host.getName()), "gem_id": gem_id, "gem_name": gem_name,
+			"socket_index": idx, "to_inventory": bool(added),
+			"sockets": _socket_list(host, inv)}
+	return {"ok": false, "error": "gem_freed_during_unsocket"}
+
 func buy_item(ctx, args):
 	var g = _game(ctx)
 	var shop = _shop(ctx)
@@ -947,6 +1105,8 @@ func buy_item(ctx, args):
 			skill_id = int(it.get_instance_id())
 			if not _in_storage(st, it):
 				it.pushToStorage()
+			if _in_storage(st, it):
+				it.reactToDropResult(Item.DropResult.AddedToStorageBox)
 		_commit(g)
 		return {"ok": true, "chosen": true, "skill": name, "skill_id": skill_id,
 			"name_localized": localized, "price": price, "gold": int(g.gold),
@@ -962,6 +1122,11 @@ func buy_item(ctx, args):
 		return {"ok": false, "error": "buy_rejected", "name": name, "price": price}
 	if is_instance_valid(it) and not _in_storage(st, it):
 		it.pushToStorage()
+	if is_instance_valid(it) and _in_storage(st, it):
+		# Normal shop purchases reach storage via a real drag/drop. Emit the
+		# same dropped signal so onDropped effects (e.g. Unidentified Skill)
+		# identify/trigger instead of remaining an inert floating item.
+		it.reactToDropResult(Item.DropResult.AddedToStorageBox)
 	_commit(g)
 	var refreshed = not is_instance_valid(it)
 	if is_instance_valid(offer):
@@ -1117,7 +1282,9 @@ func place_item(ctx, args):
 	it.pickup(it.global_position)
 	it.global_position = pos
 	it.set("placedByPlayer", true)
-	it.drop()
+	var drop_res = it.drop()
+	if is_instance_valid(it):
+		it.reactToDropResult(drop_res)
 	if not is_instance_valid(it):
 		_commit(g)
 		return {"ok": true, "item_id": iid, "name": nm, "placed": true,
@@ -1130,7 +1297,9 @@ func place_item(ctx, args):
 		elif old_cells.size() > 0:
 			it.pickup(it.global_position)
 			it.global_position = _bbox_center(inv, old_cells)
-			it.drop()
+			var rollback_res = it.drop()
+			if is_instance_valid(it):
+				it.reactToDropResult(rollback_res)
 			var restored = _cells_of(inv, it)
 			if not _same_cells(restored, old_cells):
 				_detach_item(inv, it, false, it.global_position)
@@ -1288,6 +1457,8 @@ func rotate_item(ctx, args):
 		return {"ok": false, "error": "items_fixed_in_bag_mode",
 			"detail": "switch to item/all edit mode before rotating items"}
 	var left = str(args.get("direction", "right")) == "left"
+	return {"ok": false, "error": "rotate_unsupported", "item_id": int(it.get_instance_id()),
+		"detail": "rotation is disabled: experimental native rotation is unstable for irregular items and was reverted"}
 	if _in_storage(st, it):
 		return {"ok": false, "error": "rotate_unsupported", "item_id": int(it.get_instance_id()),
 			"detail": "item face only changes the visual; the game's drop keeps the base collision. Placement resets face to 0."}
@@ -1351,7 +1522,7 @@ func rotate_bag(ctx, args):
 	if guard != null:
 		return guard
 	return {"ok": false, "error": "rotate_unsupported", "item_id": int(args.get("item_id", -1)),
-		"detail": "bag face only changes the visual; placing resets face to 0 to keep cells/display in sync."}
+		"detail": "rotation is disabled: experimental native rotation is unstable for irregular items and was reverted"}
 	_normalize(ctx)
 	var mode = int(g.inventoryEditMode)
 	if mode == 2:
@@ -1644,19 +1815,39 @@ func _affected_items(value):
 		out[str(k)] = arr
 	return out
 
-func _socket_info(inv, sock):
+func _socket_info(inv, sock, index = -1):
 	if not is_instance_valid(sock):
 		return null
-	var d = {"name": str(sock.getName()), "global_position": [sock.global_position.x, sock.global_position.y]}
+	var sname = str(sock.getName())
+	if sname == "" or sname == "Null":
+		sname = "GemSocket"
+	var d = {"index": int(index), "name": sname,
+		"global_position": [sock.global_position.x, sock.global_position.y]}
 	if inv != null and inv.has_method("globalPosToCell"):
 		var cell = inv.call("globalPosToCell", sock.global_position)
 		if cell != null:
 			d["cell"] = _pair(cell)
 	var gem = sock.get("gem")
+	d["occupied"] = is_instance_valid(gem)
 	if is_instance_valid(gem):
 		d["gem_id"] = int(gem.get_instance_id())
 		d["gem_name"] = str(gem.getName())
+		d["gem_key"] = str(gem.getName())
+		d["gem_locked"] = bool(gem.isLocked())
 	return d
+
+func _socket_list(it, inv = null):
+	var out = []
+	if it == null or not is_instance_valid(it):
+		return out
+	var socks = it.get("sockets")
+	if socks == null or typeof(socks) != TYPE_ARRAY:
+		return out
+	for i in range(socks.size()):
+		var si = _socket_info(inv, socks[i], i)
+		if si != null:
+			out.append(si)
+	return out
 
 func _star_item_info(inv, it):
 	var cells = _cells_of(inv, it)
@@ -1669,8 +1860,8 @@ func _star_item_info(inv, it):
 		"sockets": []}
 	var socks = it.get("sockets")
 	if socks != null and typeof(socks) == TYPE_ARRAY:
-		for s in socks:
-			var si = _socket_info(inv, s)
+		for i in range(socks.size()):
+			var si = _socket_info(inv, socks[i], i)
 			if si != null:
 				out["sockets"].append(si)
 	return out
@@ -1832,6 +2023,238 @@ func get_stamina(ctx, args):
 			"stamina_regen": p.get("staminaRegen") if p != null else null,
 			"current_available": cur != null, "max_available": mx != null},
 		"deployed_stamina_cost": total, "items": items}
+
+func _rotation_target(cells, left):
+	var top = _min_cell(cells)
+	var rel = []
+	for c in cells:
+		var r = c - top
+		var p = Vector2(r.y, -r.x) if left else Vector2(-r.y, r.x)
+		rel.append(p)
+	var norm = _normalize_cells(rel)
+	var target = []
+	for c in norm:
+		target.append(top + c)
+	return target
+
+func _set_face(it, face):
+	it.set("faceDirection", face)
+	it.set("rotation_degrees", face * 90)
+	it.set("rotation", deg2rad(face * 90))
+
+func _rotate_item_exec(ctx, g, inv, st, it, left):
+	if _in_storage(st, it):
+		return {"ok": false, "error": "rotate_storage_unsupported", "item_id": int(it.get_instance_id()),
+			"detail": "rotate the item after placing it; storage rotation has no cells to update"}
+	var old_cells = _cells_of(inv, it)
+	if old_cells.size() == 0:
+		return {"ok": false, "error": "item_not_placed"}
+	var target = _rotation_target(old_cells, left)
+	var err = _validate_item_target(inv, target, it)
+	if err != "":
+		return {"ok": false, "error": "cannot_rotate_in_place", "detail": err,
+			"cells": _cells_array(old_cells)}
+	var face = (int(it.getFaceDirection()) + (3 if left else 1)) % 4
+	var old_pos = it.global_position
+	_detach_item(inv, it, false, it.global_position)
+	inv.addItem(it, target, true)
+	_ensure_in_items(inv, it)
+	var actual = _cells_of(inv, it)
+	if not _same_cells(actual, target):
+		_detach_item(inv, it, false, it.global_position)
+		inv.addItem(it, old_cells, true)
+		it.global_position = old_pos
+		return {"ok": false, "error": "cannot_rotate_in_place",
+			"target_cells": _cells_array(target), "actual_cells": _cells_array(actual)}
+	_set_face(it, face)
+	it.global_position = _bbox_center(inv, actual)
+	it.set("placedByPlayer", true)
+	it.set("placed", true)
+	it.set("dragged", false)
+	_touch_bag(inv, actual)
+	_commit(g)
+	return {"ok": true, "rotation": face, "top_left": _pair(_min_cell(actual)),
+		"cells": _cells_array(actual), "stored": false, "moved_to_storage": []}
+
+func _rotate_bag_exec(ctx, g, inv, st, args):
+	var bag = _find_item(ctx, args)
+	if bag == null or not bag.isBag():
+		return {"ok": false, "error": "bag_not_found"}
+	if _in_storage(st, bag):
+		return {"ok": false, "error": "rotate_storage_unsupported", "bag_id": int(bag.get_instance_id())}
+	var occupied = _bag_contents(inv, bag)
+	if occupied.size() > 0:
+		return {"ok": false, "error": "bag_not_empty", "item_count": occupied.size(),
+			"detail": "move contents out before rotating a bag"}
+	var old_cells = _bag_cells(inv, bag)
+	if old_cells.size() == 0:
+		return {"ok": false, "error": "bag_not_placed"}
+	var left = str(args.get("direction", "right")) == "left"
+	var target = _rotation_target(old_cells, left)
+	var err = _validate_bag_target(inv, target, bag)
+	if err != "":
+		return {"ok": false, "error": "cannot_rotate_in_place", "detail": err,
+			"cells": _cells_array(old_cells)}
+	var face = (int(bag.getFaceDirection()) + (3 if left else 1)) % 4
+	var old_pos = bag.global_position
+	bag.pickup()
+	inv.addItem(bag, target, true)
+	_ensure_in_items(inv, bag)
+	var actual = _bag_cells(inv, bag)
+	if not _same_cells(actual, target):
+		bag.pickup()
+		inv.addItem(bag, old_cells, true)
+		bag.global_position = old_pos
+		return {"ok": false, "error": "cannot_rotate_in_place",
+			"target_cells": _cells_array(target), "actual_cells": _cells_array(actual)}
+	_set_face(bag, face)
+	bag.global_position = _bbox_center(inv, actual)
+	bag.set("placedByPlayer", true)
+	_touch_bag(inv, actual)
+	_commit(g)
+	return {"ok": true, "rotation": face, "top_left": _pair(_min_cell(actual)),
+		"cells": _cells_array(actual), "moved_items": 0, "moved_to_storage": []}
+
+func native_rotate_prepare(ctx, args):
+	var g = _game(ctx)
+	var inv = _inv(ctx)
+	if g == null or inv == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var guard = _not_in_shop(g)
+	if guard != null:
+		return guard
+	var it = _find_item(ctx, args)
+	if it == null:
+		return {"ok": false, "error": "item_not_found"}
+	var old_cells = []
+	if it.isBag():
+		old_cells = _bag_cells(inv, it)
+		if old_cells.size() == 0:
+			return {"ok": false, "error": "bag_not_placed"}
+		var occupied = _bag_contents(inv, it)
+		if occupied.size() > 0:
+			return {"ok": false, "error": "bag_not_empty", "item_count": occupied.size(),
+				"detail": "rotation currently supports empty bags only"}
+		g.setInventoryEditMode(1)
+	else:
+		old_cells = _cells_of(inv, it)
+		if old_cells.size() == 0:
+			return {"ok": false, "error": "item_not_placed"}
+		g.setInventoryEditMode(2)
+	var left = str(args.get("direction", "right")) == "left"
+	var target = _rotation_target(old_cells, left)
+	var target_err = _validate_bag_target(inv, target, it) if it.isBag() else _validate_rotation_item_target(inv, target, it)
+	if target_err != "":
+		return {"ok": false, "error": "cannot_rotate_in_place", "detail": target_err,
+			"target_cells": _cells_array(target)}
+	var pos = inv.cellToGlobalPos(old_cells[0], true)
+	var target_pos = _bbox_center(inv, target)
+	it.set_meta("mcp_rotate_old_cells", old_cells)
+	it.set_meta("mcp_rotate_old_pos", it.global_position)
+	it.set_meta("mcp_rotate_old_face", int(it.getFaceDirection()))
+	return {"ok": true, "item_id": int(it.get_instance_id()), "name": str(it.getName()),
+		"is_bag": bool(it.isBag()), "edit_mode": int(g.inventoryEditMode),
+		"old_cells": _cells_array(old_cells), "face": int(it.getFaceDirection()),
+		"target_cells": _cells_array(target),
+		"viewport": [pos.x, pos.y], "target_viewport": [target_pos.x, target_pos.y]}
+
+func viewport_mouse(ctx, args):
+	var vp = ctx.root.get_viewport()
+	var p = vp.get_mouse_position()
+	return {"ok": true, "mouse": [p.x, p.y]}
+
+func native_rotate_finish(ctx, args):
+	var g = _game(ctx)
+	var inv = _inv(ctx)
+	if g == null or inv == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var it = _find_item(ctx, args)
+	if it == null:
+		return {"ok": false, "error": "item_not_found"}
+	var old_cells = it.get_meta("mcp_rotate_old_cells", [])
+	var old_face = int(it.get_meta("mcp_rotate_old_face", int(it.getFaceDirection())))
+	var left = bool(args.get("left", false))
+	var target = _rotation_target(old_cells, left)
+	var is_bag = it.isBag()
+	var err = _validate_bag_target(inv, target, it) if is_bag else _validate_rotation_item_target(inv, target, it)
+	if err != "":
+		return {"ok": false, "error": "cannot_rotate_in_place", "detail": err}
+	var tmin = _min_cell(target)
+	it.set_process(false)
+	inv.removeItem(it)
+	inv.orientItem(it, tmin, int(it.getFaceDirection()))
+	inv.addItemByTopLeft(it, tmin)
+	it.set("dragged", false)
+	it.set("placed", true)
+	it.set("placedByPlayer", true)
+	it.set("focus", false)
+	g.set("draggedItem", null)
+	g.onInventoryChanged()
+	inv.cleanUp()
+	it.set_process(true)
+	var actual = _bag_cells(inv, it) if is_bag else _cells_of(inv, it)
+	return {"ok": true, "rotation": int(it.getFaceDirection()), "cells": _cells_array(actual),
+		"target_cells": _cells_array(target), "is_bag": is_bag,
+		"atomic": true}
+
+func _abort_native_rotate(inv, g, it, old_cells, old_pos, old_face):
+	if not is_instance_valid(it):
+		return
+	it.pickup(it.global_position)
+	if old_cells.size() > 0:
+		inv.addItem(it, old_cells, true)
+		it.global_position = old_pos
+	it.set("faceDirection", old_face)
+	it.set("rotation_degrees", old_face * 90)
+	it.set("dragged", false)
+	g.set("draggedItem", null)
+
+func native_rotate_abort(ctx, args):
+	var g = _game(ctx)
+	var inv = _inv(ctx)
+	if g == null or inv == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var it = g.get("draggedItem")
+	if is_instance_valid(it):
+		var old_cells = it.get_meta("mcp_rotate_old_cells", [])
+		var old_pos = it.get_meta("mcp_rotate_old_pos", it.global_position)
+		var old_face = int(it.get_meta("mcp_rotate_old_face", int(it.getFaceDirection())))
+		_abort_native_rotate(inv, g, it, old_cells, old_pos, old_face)
+	return {"ok": true}
+
+func native_rotate_rotate(ctx, args):
+	var g = _game(ctx)
+	if g == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var it = _find_item(ctx, args)
+	if it == null:
+		return {"ok": false, "error": "item_not_found"}
+	var face = (int(it.getFaceDirection()) + (3 if bool(args.get("left", false)) else 1)) % 4
+	it.setFaceDirectionInstant(face)
+	it.previewCellCollision()
+	_game(ctx).onItemRotated()
+	return {"ok": true, "face": int(it.getFaceDirection())}
+
+func native_rotate_key(ctx, args):
+	var g = _game(ctx)
+	if g == null:
+		return {"ok": false, "error": "game_not_ready"}
+	var it = g.get("draggedItem")
+	if not is_instance_valid(it):
+		return {"ok": false, "error": "item_not_held"}
+	var down = InputEventKey.new()
+	down.scancode = KEY_R
+	down.physical_scancode = KEY_R
+	down.unicode = 114
+	down.pressed = true
+	Input.parse_input_event(down)
+	var up = InputEventKey.new()
+	up.scancode = KEY_R
+	up.physical_scancode = KEY_R
+	up.unicode = 114
+	up.pressed = false
+	Input.parse_input_event(up)
+	return {"ok": true, "face": int(it.getFaceDirection())}
 
 func get_recipes(ctx, args):
 	var g = _game(ctx)

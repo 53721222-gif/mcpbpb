@@ -37,11 +37,14 @@
 | 信息 | `bpb_get_star_slots` | 星位/受影响格（方向 0/2/4/7）、当前命中物品、extension_cells、宝石 sockets |
 | 信息 | `bpb_get_stamina` | 玩家 stamina/max/regen、每件物品 stamina_cost/types/伤害，已部署总耗 |
 | 信息 | `bpb_get_recipes` | base/result/ingredients/催化剂、作为材料配方、牌堆 gated_items |
-| 购买 | `bpb_buy_item` | 买商店物品并放入**储物箱**（`slot` 1-5 或 `item_id`）；技能商店时选择技能并放入储物箱（返回 `skill_id`） |
+| 购买 | `bpb_buy_item` | 买商店物品并放入**储物箱**（`slot` 1-5 或 `item_id`）；会补发 `dropped` 信号，触发 `onDropped` 购买效果（如未挖掘潜力）；技能商店返回 `skill_id` |
 | 商店 | `bpb_reserve_item` | 保留/取消保留商店物品（免费，跨刷新保留） |
 | 商店 | `bpb_refresh_shop` | 刷新商店（扣金币） |
 | 背包 | `bpb_store_item` | 把背包物品放回储物箱，腾出格子 |
 | 背包 | `bpb_sell_item` | 出售背包物品，立即获得金币（储物箱物品需先放回背包） |
+| 背包 | `bpb_set_fusion_lock` | 锁定/解除物品自动融合（`item_id` + `locked=true/false`）；背包/储物箱物品可用，背包本体不可用 |
+| 宝石 | `bpb_socket_gem` | 把宝石镶到宿主物品的空镶嵌位（`host_id` + `gem_id` + `socket_index`，默认 0） |
+| 宝石 | `bpb_unsocket_gem` | 从宿主镶嵌位取下宝石；优先放回背包，没空格则进储物箱 |
 | 编辑 | `bpb_open_backpack_edit` | 进入背包层编辑模式（等价 bags） |
 | 编辑 | `bpb_open_item_edit` | 进入物品层编辑模式（等价 items） |
 | 编辑 | `bpb_edit_items` | 只编辑物品：背包固定，物品可放到任意格子（包括包外） |
@@ -50,8 +53,8 @@
 | 编辑 | `bpb_set_edit_mode` | 兼容别名：all/bags/items/default/bag/item |
 | 摆放 | `bpb_place_item` | 原生 drop 落格（pickup 当前位置 → drop）；物品/全部模式允许包外/跨包 |
 | 摆放 | `bpb_place_bag` | 移动**空背包**；非空返回 `bag_not_empty`。背包模式物品绝对位置不变 |
-| 旋转 | `bpb_rotate_item` | 当前返回 `rotate_unsupported`：face 只改视觉，drop 用基础碰撞；放置会自动 face=0 |
-| 旋转 | `bpb_rotate_bag` | 当前返回 `rotate_unsupported`（face 只改视觉，放置强制 face=0/rotation=0） |
+| 旋转 | `bpb_rotate_item` | 游戏内原子旋转：removeItem→orientItem→addItemByTopLeft，绕过 drop/hotswap；目标需在包内且不重叠；`BPB_ROTATE=0` 关闭 |
+| 旋转 | `bpb_rotate_bag` | 游戏内原子旋转空背包；非空返回 `bag_not_empty`；`BPB_ROTATE=0` 关闭 |
 | 战斗 | `bpb_start_battle` | 开始战斗；开战前只规范化落格，不移走跨包物品 |
 | 战斗 | `bpb_wait_for_result` | 等待结算；自动跳过并回商店；10 胜提示会返回 `survival_choice_required` |
 | 战斗 | `bpb_skip_result` | 手动跳过结算；10 胜提示下被拦截，需先选择 |
@@ -62,7 +65,11 @@
 | 开局 | `bpb_start_run` / `bpb_continue` | 新开一局（可带 class_id/loadout）/ 继续挂起的 run |
 | 诊断 | `bpb_health` | 检查网桥与当前状态 |
 
-> 购买后物品/技能进**储物箱**，不会自动进背包；需要再调用 `bpb_place_item`。技能也是 1×1 可摆放 Item。
+> 购买后物品/技能进**储物箱**，不会自动进背包；需要再调用 `bpb_place_item`。购买与放置都会补发 `dropped` 信号，触发 `onDropped` 类效果（未挖掘潜力、Lootbox、Amulet Unidentified 等）。技能也是 1×1 可摆放 Item。
+>
+> **融合锁定**：`state.backpack.items[].fusion_locked` / `storage[].fusion_locked` 表示物品是否锁定自动融合；`state.backpack.fusion_locked_count` 是背包内数量。用 `bpb_set_fusion_lock` 切换，锁定后不能用该物品自动合成，解锁后恢复；背包本体不可锁定。
+>
+> **宝石镶嵌**：`state.backpack.items[].sockets` / `storage[].sockets` 是每个镶嵌位的 `{index, occupied, gem_id, gem_name}`；`is_gem=true` 的物品是散装宝石。用 `bpb_socket_gem` 镶入、`bpb_unsocket_gem` 取下；`socketed_gems_count` 是已镶数量。
 >
 > **购买后编辑流程**：`bpb_edit_items`（物品可放包外）→ `bpb_edit_bags`（移动背包覆盖物品，物品固定）→ `bpb_edit_all`（规范化落格；跨包物品保留）。
 >
@@ -249,7 +256,7 @@ python -m bpb_mcp.cli state
 ```
 
 - `bpb_edit_bags` 下调 `bpb_place_item` 返回 `items_fixed_in_bag_mode`。
-- `bpb_edit_items` 下调 `bpb_place_bag` 返回 `bags_fixed_in_item_mode`；`bpb_rotate_bag` 返回 `rotate_unsupported`。
+- `bpb_edit_items` 下调 `bpb_place_bag` 返回 `bags_fixed_in_item_mode`；`bpb_rotate_bag` 对空背包原子旋转，非空返回 `bag_not_empty`。
 - `bpb_edit_all` 是最终化步骤；之后检查 `backpack.floating_count == 0`，并确认关键物品仍在背包中。跨包允许。
 
 ### 10 胜提示
@@ -457,6 +464,11 @@ bpb_skip_result / bpb_wait_for_result 在提示出现时返回 survival_choice_r
 - `script`：物品脚本路径（可用于区分技能/普通 Exclusive 物品）。
 - `shape`：物品当前朝向的归一化占用格（相对左上角）。
 - `sell_price`：出售价格；用 `bpb_sell_item` 卖出。
+- `fusion_locked` / `locked`：该物品是否锁定自动融合；用 `bpb_set_fusion_lock` 切换。
+- `backpack.fusion_locked_count`：背包内已锁定自动融合的物品数量。
+- `is_gem`：该物品是否宝石类（可镶嵌）。
+- `sockets`：该物品的镶嵌位列表 `{index,occupied,gem_id,gem_name}`；用 `bpb_socket_gem` / `bpb_unsocket_gem`。
+- `backpack.socketed_gems_count`：已镶入宿主物品的宝石数量（背包 + 储物箱宿主）。
 - `edit_mode`：`all` / `bags` / `items`。
 - `backpack.outside_count`：当前不在任何背包内的物品数量。
 - `backpack.invalid_count`：兼容字段，当前不把跨包/包外算非法；正常为 0。
@@ -479,7 +491,7 @@ bpb_skip_result / bpb_wait_for_result 在提示出现时返回 survival_choice_r
 
 > 坐标：`x` 为列 0-8，`y` 为行 0-6。正常摆放要求物品在**背包覆盖的格子**里；`items` 模式允许临时放在包外，`all` 模式会把不落在同一背包内的物品自动移入储物箱。
 
-> **技能商店**：第 3/10 回合 `shop.choose_one=true`，`shop.items[].kind="skill"`。技能在内部也是 `RigidBody2D` 的 Item（1×1、有价格/描述），**可以摆放**：`bpb_buy_item` 会选择技能并放入储物箱（返回 `skill_id`），再调用 `bpb_place_item` 摆进背包；技能会随背包一起持久化，重启后仍在。
+> **技能商店**：第 3/10 回合 `shop.choose_one=true`，`shop.items[].kind="skill"`。技能在内部也是 `RigidBody2D` 的 Item（1×1、有价格/描述），**可以摆放**：`bpb_buy_item` 会选择技能并放入储物箱（返回 `skill_id`），购买/放置都补发 `dropped`，未挖掘潜力会正常识别；再调用 `bpb_place_item` 摆进背包；技能会随背包一起持久化，重启后仍在。
 
 > **保留商店物品**：`bpb_reserve_item` 可保留/取消保留商品（免费）。`shop.items[].reserved`、`shop.reserved_count`、`shop.reserved_items` 会反映保留状态；保留项在刷新商店后仍保留。
 
@@ -510,8 +522,8 @@ bpb_skip_result / bpb_wait_for_result 在提示出现时返回 survival_choice_r
 | `bpb_set_loadout` | `loadout`（0-2） |
 | `bpb_place_item` | `item_id`, `x`, `y`（原生 drop；允许跨包/包外） |
 | `bpb_place_bag` | `item_id`, `x`, `y`（**仅空包**；非空返回 `bag_not_empty`） |
-| `bpb_rotate_item` | `item_id`, `direction`（当前返回 `rotate_unsupported`） |
-| `bpb_rotate_bag` | `item_id`, `direction`（当前返回 `rotate_unsupported`） |
+| `bpb_rotate_item` | `item_id`, `direction`（原子旋转，目标需在包内且不重叠） |
+| `bpb_rotate_bag` | `item_id`, `direction`（原子旋转，空背包） |
 | `bpb_start_battle` | 无（开战前只规范化落格，不移走跨包物品） |
 | `bpb_skip_result` | 无（10 胜提示下返回 `survival_choice_required`） |
 | `bpb_wait_for_result` | `timeout_seconds`（默认 90）, `auto_skip`（默认 true；提示下不自动选） |
@@ -715,7 +727,7 @@ python tools\smoke_live.py
 - **10 胜选择**：`state.survival.prompt_visible=true` 时必须用 `bpb_enter_survival` / `bpb_stop_here` / `bpb_choose_survival` 明确选择；`bpb_skip_result` / `bpb_wait_for_result` 会返回 `survival_choice_required`，不会自动选择。
 - **胜场**：`wins` / `current_run_wins` 是当前 run 胜场（10 胜触发提示）；`total_wins` 来自 `getRunWins()`，是累计胜场。
 - **编辑模式**：`items` 只编辑物品（包固定，物品可临时在包外）；`bags` 只编辑背包（物品绝对格固定）；`all` 全部可编辑。**物品可以同时覆盖多个背包，游戏没有单一背包限制。**
-- **背包移动/旋转**：只允许移动**空背包**；非空包返回 `bag_not_empty`。背包放置会强制 `faceDirection=0 / rotation=0`，按基础 shape 落格，避免 1×2/1×4 背包显示方向与 cells 差 90°；`bpb_rotate_bag` 返回 `rotate_unsupported`。
+- **背包移动/旋转**：只允许移动空背包；非空包返回 `bag_not_empty`。放置会强制 `faceDirection=0 / rotation=0`，按基础 shape 落格。旋转使用游戏内原子链：校验目标格全部在包内且无重叠，然后 `removeItem → orientItem → addItemByTopLeft`，不调用 `drop/tryAddItem/hotswap`。Pan 等 L 形已验证 4 连转、开战、重启。目标非法返回 `cannot_rotate_in_place`；`BPB_ROTATE=0` 可关闭。
 - **并发限制**：同一游戏同时只应有一个 MCP 客户端/服务在操作；两个窗口并发调用会交错修改背包/商店，造成浮空或闪退。
 - **落格/浮空**：`bpb_place_item` 使用游戏原生 `pickup(当前位置) → 设目标包围盒中心 → drop()`，触发正常落格回调并写回包围盒位置；跨包不拒绝。位置/朝向由游戏 drop 校验。
 - **开战前最终化**：`bpb_start_battle` 只规范化位置/`placedByPlayer`，不会把跨包物品移入储物箱。

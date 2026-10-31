@@ -108,6 +108,26 @@ class GameAPI:
     def sell_item(self, item_id: int) -> Dict[str, Any]:
         return self.bridge.api("sell_item", {"item_id": int(item_id)})
 
+    def set_fusion_lock(self, item_id: int, locked: bool = True) -> Dict[str, Any]:
+        """Lock/unlock auto-fusion for an owned backpack/storage item."""
+        return self.bridge.api("set_fusion_lock", {
+            "item_id": int(item_id), "locked": bool(locked)})
+
+    def lock_fusion(self, item_id: int) -> Dict[str, Any]:
+        return self.set_fusion_lock(item_id, True)
+
+    def unlock_fusion(self, item_id: int) -> Dict[str, Any]:
+        return self.set_fusion_lock(item_id, False)
+
+    def socket_gem(self, host_id: int, gem_id: int, socket_index: int = 0) -> Dict[str, Any]:
+        return self.bridge.api("socket_gem", {
+            "host_id": int(host_id), "gem_id": int(gem_id),
+            "socket_index": int(socket_index)})
+
+    def unsocket_gem(self, host_id: int, socket_index: int = 0) -> Dict[str, Any]:
+        return self.bridge.api("unsocket_gem", {
+            "host_id": int(host_id), "socket_index": int(socket_index)})
+
     def reserve_item(self, slot: Optional[int] = None, item_id: Optional[int] = None,
                      reserved: bool = True) -> Dict[str, Any]:
         args: Dict[str, Any] = {"reserved": bool(reserved)}
@@ -118,10 +138,33 @@ class GameAPI:
         return self.bridge.api("reserve_shop_item", args)
 
     def rotate_item(self, item_id: int, direction: str = "right") -> Dict[str, Any]:
-        return self.bridge.api("rotate_item", {"item_id": int(item_id), "direction": direction})
+        return self._native_rotate(item_id, direction, expect_bag=False)
 
     def rotate_bag(self, item_id: int, direction: str = "right") -> Dict[str, Any]:
-        return self.bridge.api("rotate_bag", {"item_id": int(item_id), "direction": direction})
+        return self._native_rotate(item_id, direction, expect_bag=True)
+
+    def _native_rotate(self, item_id: int, direction: str, expect_bag: bool) -> Dict[str, Any]:
+        import os
+        if os.environ.get("BPB_ROTATE", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return {"ok": False, "error": "rotate_disabled",
+                    "detail": "set BPB_ROTATE=1 to enable atomic rotation"}
+        prep = self.bridge.api("native_rotate_prepare", {
+            "item_id": int(item_id), "direction": direction})
+        if not prep.get("ok"):
+            return prep
+        if bool(prep.get("is_bag")) != bool(expect_bag):
+            return {"ok": False, "error": "wrong_item_kind"}
+        rot = self.bridge.api("native_rotate_rotate", {
+            "item_id": int(item_id), "left": direction == "left"})
+        if not rot.get("ok"):
+            self.bridge.api("native_rotate_abort", {})
+            return rot
+        finish = self.bridge.api("native_rotate_finish", {
+            "item_id": int(item_id), "left": direction == "left"})
+        if not finish.get("ok"):
+            return finish
+        return {"ok": True, "rotation": int(finish.get("rotation", -1)),
+                "cells": finish.get("cells"), "atomic": True}
 
     def start_battle(self) -> Dict[str, Any]:
         result = self.bridge.api("start_battle", {})

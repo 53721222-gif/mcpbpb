@@ -39,6 +39,18 @@ class FakeAPI:
     def sell_item(self, item_id):
         return {"ok": True, "sold": True, "item_id": item_id, "gold_gained": 2}
 
+    def set_fusion_lock(self, item_id, locked=True):
+        return {"ok": True, "item_id": item_id, "fusion_locked": bool(locked),
+                "previous_fusion_locked": not bool(locked), "changed": True}
+
+    def socket_gem(self, host_id, gem_id, socket_index=0):
+        return {"ok": True, "host_id": host_id, "gem_id": gem_id,
+                "socket_index": socket_index, "socketed": True}
+
+    def unsocket_gem(self, host_id, socket_index=0):
+        return {"ok": True, "host_id": host_id, "socket_index": socket_index,
+                "unsocketed": True}
+
     def set_edit_mode(self, mode="default"):
         return {"ok": True, "mode": mode}
 
@@ -124,6 +136,7 @@ class TestMcpProtocol(unittest.TestCase):
         names = [t["name"] for t in responses[1]["result"]["tools"]]
         for expected in ("bpb_get_state", "bpb_get_phase", "bpb_buy_item",
                          "bpb_sell_item", "bpb_place_item", "bpb_start_battle",
+                         "bpb_set_fusion_lock", "bpb_socket_gem", "bpb_unsocket_gem",
                          "bpb_set_class", "bpb_set_loadout",
                          "bpb_edit_items", "bpb_edit_bags", "bpb_edit_all",
                          "bpb_enter_survival", "bpb_stop_here", "bpb_choose_survival"):
@@ -151,11 +164,19 @@ class TestMcpProtocol(unittest.TestCase):
              "params": {"name": "bpb_set_class", "arguments": {"class_id": 2, "loadout": 0}}},
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
              "params": {"name": "bpb_edit_all", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "bpb_set_fusion_lock",
+                        "arguments": {"item_id": 7, "locked": True}}},
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "bpb_socket_gem",
+                        "arguments": {"host_id": 1, "gem_id": 2, "socket_index": 0}}},
         ])
         self.assertEqual(responses[0]["result"]["structuredContent"]["state"], "shop")
         self.assertTrue(responses[1]["result"]["structuredContent"]["sold"])
         self.assertEqual(responses[2]["result"]["structuredContent"]["class"], 2)
         self.assertEqual(responses[3]["result"]["structuredContent"]["mode"], "all")
+        self.assertTrue(responses[4]["result"]["structuredContent"]["fusion_locked"])
+        self.assertTrue(responses[5]["result"]["structuredContent"]["socketed"])
 
     def test_unknown_tool_is_error(self):
         responses = self._run([

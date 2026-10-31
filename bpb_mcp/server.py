@@ -22,6 +22,10 @@ INSTRUCTIONS = (
     "bpb_start_battle 后调用 bpb_wait_for_result 等待并跳过结算，回到下一回合商店。"
     "标题界面可读 state.title，再用 bpb_set_class / bpb_set_loadout 选择职业与 loadout。"
     "出售背包物品用 bpb_sell_item。"
+    "融合锁定用 bpb_set_fusion_lock（item_id + locked=true/false）：锁定后物品不会自动合成，"
+    "解锁后恢复；state 的 item.fusion_locked 表示当前状态。"
+    "宝石镶嵌用 bpb_socket_gem（host_id + gem_id + socket_index）和 bpb_unsocket_gem；"
+    "宿主 state.sockets 给出空位与已镶宝石。"
     "购买后推荐编辑顺序：bpb_edit_items（物品可放包外）→ bpb_edit_bags（移包覆盖，物品固定）"
     "→ bpb_edit_all（规范化落格，不移走跨包物品）。"
     "10 胜提示时 state.survival.prompt_visible=true，必须用 bpb_enter_survival / bpb_stop_here "
@@ -54,7 +58,8 @@ TOOLS: List[Dict[str, Any]] = [
         "商店物品/技能及价格、保留项、刷新费、背包 9x7 摆盘（bags/items/grid）、储物箱、"
         "战斗结算是否可跳过。战斗期间只返回摘要（inventory_available=false），"
         "不会触碰背包/商店；结算后回到 shop 再读取完整状态。"
-        "返回的 id 字段用于后续 buy/place/rotate/store/reserve 操作。",
+        "返回的 id 字段用于后续 buy/place/rotate/store/reserve/socket 操作；"
+        "item.fusion_locked / item.locked 是融合锁定状态；item.is_gem 与 item.sockets 用于宝石镶嵌。",
     ),
     _tool(
         "bpb_get_phase",
@@ -64,13 +69,13 @@ TOOLS: List[Dict[str, Any]] = [
     _tool(
         "bpb_get_backpack",
         "读取当前完整背包布局：所有已部署背包（位置/cells/shape/rotation）、"
-        "所有已放置物品（位置/cells/shape/rotation/bag_id/floating）、grid、储物箱，"
-        "以及 bags/items/floating/outside 计数。只读，不触发 normalize 或存档写入。",
+        "所有已放置物品（位置/cells/shape/rotation/bag_id/floating/fusion_locked/is_gem/sockets）、grid、储物箱，"
+        "以及 bags/items/floating/outside/fusion_locked/socketed_gems 计数。只读，不触发 normalize 或存档写入。",
     ),
     _tool(
         "bpb_get_star_slots",
         "读取星位/受影响格与宝石插槽。返回每件已放置物品的 affected_cells（按方向 0/2/4/7）、"
-        "current_affected_items（当前命中物品）、extension_cells 和 sockets（位置/gem）。"
+        "current_affected_items（当前命中物品）、extension_cells 和 sockets（index/位置/occupied/gem_id/gem_name）。"
         "可选 item_id 只查一件。",
         {"item_id": {"type": "integer", "description": "可选物品实例 id"}},
     ),
@@ -90,7 +95,8 @@ TOOLS: List[Dict[str, Any]] = [
         "bpb_buy_item",
         "购买商店物品并放入储物箱。若 state.shop.choose_one=true（第 3/10 回合的技能商店），"
         "则选择一个技能并放入储物箱（返回 skill_id）；技能是 1×1 可摆放物品，"
-        "再用 bpb_place_item 摆进背包。用 slot（1-5）或 item_id 指定。",
+        "再用 bpb_place_item 摆进背包。购买后会补发 dropped 信号，触发 Unidentified Skill 等 onDropped 购买效果。"
+        "用 slot（1-5）或 item_id 指定。",
         {
             "slot": {"type": "integer", "minimum": 1, "maximum": 5, "description": "商店槽位，从 1 开始"},
             "item_id": {"type": "integer", "description": "商店物品/技能的 id（来自 bpb_get_state）"},
@@ -131,6 +137,37 @@ TOOLS: List[Dict[str, Any]] = [
         "储物箱里的物品需先 bpb_place_item 放回背包再出售。",
         {"item_id": {"type": "integer", "description": "背包内物品 id"}},
         ["item_id"],
+    ),
+    _tool(
+        "bpb_set_fusion_lock",
+        "锁定或解除物品的自动融合。locked=true 锁定（阻止自动合成），"
+        "locked=false 解除；背包和储物箱物品可用，背包本体不可用。"
+        "state 中 item.fusion_locked 反映结果。",
+        {
+            "item_id": {"type": "integer", "description": "物品 id（背包或储物箱）"},
+            "locked": {"type": "boolean", "description": "true=锁定融合，false=解除融合锁定"},
+        },
+        ["item_id", "locked"],
+    ),
+    _tool(
+        "bpb_socket_gem",
+        "把宝石类物品镶到宿主物品的空镶嵌位。host_id 的 state.sockets 提供 socket_index、"
+        "occupied、gem_id；宝石可以是背包或储物箱中的散装宝石。镶嵌是原子的，不走 drop/hotswap。",
+        {
+            "host_id": {"type": "integer", "description": "宿主物品 id（武器/防具等，且有 socket）"},
+            "gem_id": {"type": "integer", "description": "宝石物品 id（如 Lump of Coal / Chipped Ruby）"},
+            "socket_index": {"type": "integer", "minimum": 0, "description": "镶嵌位索引，默认 0"},
+        },
+        ["host_id", "gem_id"],
+    ),
+    _tool(
+        "bpb_unsocket_gem",
+        "从宿主物品的镶嵌位取下宝石。优先放回背包空格；没有空格时放储物箱。",
+        {
+            "host_id": {"type": "integer", "description": "宿主物品 id"},
+            "socket_index": {"type": "integer", "minimum": 0, "description": "镶嵌位索引，默认 0"},
+        },
+        ["host_id"],
     ),
     _tool(
         "bpb_edit_items",
@@ -197,8 +234,9 @@ TOOLS: List[Dict[str, Any]] = [
     ),
     _tool(
         "bpb_rotate_item",
-        "当前游戏物品 face 只改视觉，drop 仍使用基础碰撞，旋转会与落格 90° 不一致并可能崩溃；"
-        "此工具返回 rotate_unsupported。放置时会自动把 face 归零，按基础 shape 落格。",
+        "游戏内原子旋转（已启用）：目标格全在包内且无重叠时，"
+        "直接 removeItem → orientItem → addItemByTopLeft，不经过 drop/tryAddItem/hotswap。"
+        "支持矩形和 L 形；目标不合法返回 cannot_rotate_in_place。BPB_ROTATE=0 可关闭。",
         {
             "item_id": {"type": "integer"},
             "direction": {"type": "string", "enum": ["right", "left"], "default": "right"},
@@ -207,8 +245,9 @@ TOOLS: List[Dict[str, Any]] = [
     ),
     _tool(
         "bpb_rotate_bag",
-        "当前返回 rotate_unsupported：背包 face 只改视觉，放置会强制 face=0/rotation=0，"
-        "按基础 shape 落格，避免 1×2/1×4 背包显示方向与 cells 差 90°。",
+        "游戏内原子旋转空背包（已启用）：目标格全在包内且无重叠时，"
+        "removeItem → orientItem → addItemByTopLeft；非空背包返回 bag_not_empty。"
+        "BPB_ROTATE=0 可关闭。",
         {
             "item_id": {"type": "integer"},
             "direction": {"type": "string", "enum": ["right", "left"], "default": "right"},
@@ -426,6 +465,14 @@ class McpServer:
             return self.api.store_item(int(args["item_id"]))
         if name == "bpb_sell_item":
             return self.api.sell_item(int(args["item_id"]))
+        if name == "bpb_set_fusion_lock":
+            return self.api.set_fusion_lock(int(args["item_id"]), bool(args.get("locked", True)))
+        if name == "bpb_socket_gem":
+            return self.api.socket_gem(int(args["host_id"]), int(args["gem_id"]),
+                                       int(args.get("socket_index", 0)))
+        if name == "bpb_unsocket_gem":
+            return self.api.unsocket_gem(int(args["host_id"]),
+                                         int(args.get("socket_index", 0)))
         if name == "bpb_set_edit_mode":
             return self.api.set_edit_mode(args.get("mode", "all"))
         if name == "bpb_edit_items":
