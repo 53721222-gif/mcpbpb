@@ -29,10 +29,11 @@ MCP 工具返回通常同时有 `structuredContent` 和 `content[].text` 中的 
 | `total_wins` | 累计胜场；不是本局十胜判断依据。 |
 | `hp.current/max` | 玩家生命。新局第一回合 `hp.max=25`，后续由游戏成长。 |
 | `survival.prompt_visible` | 十胜“到此为止 / 进入生存”提示是否出现。 |
-| `survival.can_start` | 是否允许进入生存；选择时应与提示同时为真。 |
+| `survival.can_start` | 是否允许进入生存；十胜后可先于 `prompt_visible` 为真（原生提示延迟 1 秒）。 |
 | `survival.can_stop_here` | 是否允许“到此为止”；本技能目标下不选。 |
 | `survival.was_max_wins` | 是否达到十胜上限；不能替代提示/生存判断。 |
 | `survival.survival_mode` | 是否已进入生存；进入后检查为真且提示关闭。 |
+| `survival.just_started` | 刚确认生存、仍在切回商店的 1 秒过渡；此时禁止 skip。 |
 | `gold`, `shop.reroll_cost` | 当前金币和真实刷新成本，不能假定刷新永远 1 金币。 |
 | `shop.items[]` | 未购买商品：`id/slot/kind/is_bag/price/sell_price/on_sale/affordable/reserved/can_reserve/description/shape/cells_count` 等。 |
 | `shop.choose_one` | 五选一技能商店标记；按字段判断，不把固定回合当唯一依据。 |
@@ -118,8 +119,8 @@ MCP 工具返回通常同时有 `structuredContent` 和 `content[].text` 中的 
 | `bpb_place_item`, `bpb_place_bag` | `{"item_id":整数,"x":整数,"y":整数}`。 |
 | `bpb_rotate_item` | `{"item_id":整数,"direction":"right"|"left"}`；原子旋转，目标需在包内且不重叠。 |
 | `bpb_rotate_bag` | 同上；原子旋转空背包，非空返回 `bag_not_empty`。 |
-| `bpb_start_battle`, `bpb_skip_result` | `{}`；skip 只在普通结算可跳过时使用。 |
-| `bpb_enter_survival` | `{}`；提示可见且 `can_start=true` 时。 |
+| `bpb_start_battle`, `bpb_skip_result` | `{}`；skip 只在普通结算可跳过时使用；十胜前后均拒绝 skip。 |
+| `bpb_enter_survival` | `{}`；十胜且 `can_start=true` 即可，提示延迟时会主动打开；不会先结算奖杯。 |
 | `bpb_choose_survival` | `{"choice":"survival"}`；禁止 `stop`。 |
 | `bpb_stop_here` | `{}`；本技能目标下禁止。 |
 | `bpb_wait_for_result` | `{"timeout_seconds":90,"auto_skip":false}`；范围 5–300 秒。 |
@@ -201,7 +202,7 @@ MCP 工具返回通常同时有 `structuredContent` 和 `content[].text` 中的 
 
 ## 结算与生存
 
-普通战斗推荐 `bpb_wait_for_result {"timeout_seconds":90,"auto_skip":true}`；`auto_skip=false` 在普通结算可跳过时返回 `result="ready"`。十胜提示都会返回 `survival_choice_required`，需明确选择。
+普通战斗推荐 `bpb_wait_for_result {"timeout_seconds":90,"auto_skip":true}`；`auto_skip=false` 在普通结算可跳过时返回 `result="ready"`。十胜时即使提示还在 1 秒延迟中，也返回 `survival_choice_required`，绝不先 auto-skip 到奖杯结算；需明确选择。
 
 处理顺序：
 
@@ -210,7 +211,7 @@ MCP 工具返回通常同时有 `structuredContent` 和 `content[].text` 中的 
 3. 检查 `ok` 和 `phase`，再用 `bpb_get_phase` 确认 `survival_mode=true`、`prompt_visible=false`。
 4. 回 shop 重新读完整状态；仍 combat 则按 phase 等待。`result="skipped"` 也可能仍 combat，不能据此购物或重复开战。
 
-`survival_prompt_not_visible` 可能表示提示尚未出现/已处理，重新读 phase；`cannot_start_survival` 检查 `can_start` 并有限等待；持续失败报告具体错误并保留当前局。仅 `wins>=10`、`was_max_wins=true` 或累计胜场高不构成再次点击理由。
+`survival_prompt_not_visible` 可能表示提示尚未出现/已处理；若 `wins>=10` 且 `can_start=true`，仍可调用 `bpb_enter_survival`（会主动打开提示）。`cannot_start_survival` 检查 `can_start` 并有限等待；持续失败报告具体错误并保留当前局。仅 `was_max_wins=true` 或累计胜场高不构成再次点击理由。进入后 `just_started=true` 时等切回 shop，不要 skip。
 
 `bpb_start_run` 只支持 `unranked/ranked`，不是生存选择。标题未加载可 `title_not_ready`；商店转场可短暂 `can_start_battle=false`。`timeout` 不代表本局结束。
 

@@ -28,8 +28,9 @@ INSTRUCTIONS = (
     "宿主 state.sockets 给出空位与已镶宝石。"
     "购买后推荐编辑顺序：bpb_edit_items（物品可放包外）→ bpb_edit_bags（移包覆盖，物品固定）"
     "→ bpb_edit_all（规范化落格，不移走跨包物品）。"
-    "10 胜提示时 state.survival.prompt_visible=true，必须用 bpb_enter_survival / bpb_stop_here "
-    "明确选择；bpb_skip_result / bpb_wait_for_result 会返回 survival_choice_required。"
+    "10 胜时 state.survival.can_start=true 即可用 bpb_enter_survival（提示可能延迟约 1 秒）；"
+    "bpb_skip_result / bpb_wait_for_result 在十胜提示出现前后都会返回 survival_choice_required，"
+    "不会先结算奖杯。"
     "战斗期间 bpb_get_state 只返回摘要（inventory_available=false），不会触碰背包；"
     "需要完整背包/商店请在 state=shop 时读取。"
     "背包是 9x7 网格，正常摆放要求物品在包（bag）覆盖的格子里；坐标 x=列, y=行，从 0 开始。"
@@ -262,17 +263,17 @@ TOOLS: List[Dict[str, Any]] = [
     _tool(
         "bpb_skip_result",
         "跳过战斗结算界面回到商店（仅在 state.can_skip_result=true 时调用）。"
-        "若 state.survival.prompt_visible=true，会返回 survival_choice_required，"
+        "十胜时即使 state.survival.prompt_visible 仍为 false，也会返回 survival_choice_required；"
         "必须先 bpb_choose_survival / bpb_enter_survival / bpb_stop_here 做出选择。",
     ),
     _tool(
         "bpb_enter_survival",
-        "10 胜提示时选择“进入生存模式”。仅在 state.survival.prompt_visible=true 且 "
-        "state.survival.can_start=true 时可用；会继续本局进入生存模式。",
+        "十胜时选择“进入生存模式”。state.survival.can_start=true 即可调用；"
+        "若原生提示仍在 1 秒延迟中，会主动打开提示后再进入。不会先结算奖杯。",
     ),
     _tool(
         "bpb_stop_here",
-        "10 胜提示时选择“到此为止”。仅在 state.survival.prompt_visible=true 时可用；"
+        "十胜提示时选择“到此为止”。仅在 state.survival.prompt_visible=true 时可用；"
         "结束本轮并保留胜场。",
     ),
     _tool(
@@ -284,7 +285,8 @@ TOOLS: List[Dict[str, Any]] = [
     _tool(
         "bpb_wait_for_result",
         "等待战斗结算界面出现；auto_skip=true 时自动跳过并返回下一回合商店状态。"
-        "若出现 10 胜生存选择提示，会返回 survival_choice_required，不会自动替你选择。",
+        "十胜时不会先跳过结算（包括原生提示的 1 秒延迟窗口）；会返回 "
+        "survival_choice_required，等待选择生存模式或到此为止。",
         {
             "timeout_seconds": {"type": "number", "default": 90, "minimum": 5, "maximum": 300},
             "auto_skip": {"type": "boolean", "default": True},

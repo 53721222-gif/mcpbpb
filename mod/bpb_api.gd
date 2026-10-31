@@ -688,9 +688,10 @@ func _survival_info(ctx, g):
 	var survival_mode = false
 	if g.has_method("isSurvivalMode"):
 		survival_mode = bool(g.isSurvivalMode())
+	var just_started = bool(g.get("justStartedSurvivalMode")) if g.get("justStartedSurvivalMode") != null else false
 	return {"prompt_visible": visible, "can_start": can_start,
 		"can_stop_here": visible, "was_max_wins": was_max,
-		"survival_mode": survival_mode}
+		"survival_mode": survival_mode, "just_started": just_started}
 
 func _combat_state(ctx, g):
 	var state_id = int(g.state)
@@ -1572,14 +1573,20 @@ func enter_survival(ctx, args):
 	var g = _game(ctx)
 	if g == null:
 		return {"ok": false, "error": "game_not_ready"}
+	var combat = ctx.root.get_node_or_null("Main/Combat")
+	if combat == null or not combat.has_method("startSurvivalMode"):
+		return {"ok": false, "error": "start_survival_unavailable"}
 	var surv = _survival_info(ctx, g)
+	# The native prompt is delayed ~1s after the result screen. If the caller
+	# already detected 10 wins, create/open the prompt immediately instead of
+	# failing with survival_prompt_not_visible.
+	if not surv.prompt_visible and bool(surv.can_start) and combat.has_method("showSurvivalPrompt"):
+		combat.showSurvivalPrompt()
+		surv = _survival_info(ctx, g)
 	if not surv.prompt_visible:
 		return {"ok": false, "error": "survival_prompt_not_visible", "survival": surv}
 	if not surv.can_start:
 		return {"ok": false, "error": "cannot_start_survival", "survival": surv}
-	var combat = ctx.root.get_node_or_null("Main/Combat")
-	if combat == null or not combat.has_method("startSurvivalMode"):
-		return {"ok": false, "error": "start_survival_unavailable"}
 	combat.startSurvivalMode()
 	_commit(g)
 	return {"ok": true, "choice": "survival", "phase": get_phase(ctx, {})}
@@ -1631,6 +1638,14 @@ func skip_result(ctx, args):
 	var surv = _survival_info(ctx, g)
 	if surv.prompt_visible:
 		return {"ok": false, "error": "survival_choice_required", "survival": surv}
+	# Guard the 1s window before the native prompt becomes visible. Native
+	# skipRoundResult would otherwise see wins==MAX_WINS and endRun() first,
+	# settling trophies before survival mode starts.
+	if g.has_method("canStartSurvivalMode") and bool(g.canStartSurvivalMode()):
+		return {"ok": false, "error": "survival_choice_required", "survival": surv,
+			"detail": "10 wins: call bpb_enter_survival before bpb_skip_result"}
+	if bool(surv.get("just_started", false)):
+		return {"ok": false, "error": "survival_transition_in_progress", "survival": surv}
 	var combat = ctx.root.get_node_or_null("Main/Combat")
 	if combat == null:
 		return {"ok": false, "error": "no_combat_node"}

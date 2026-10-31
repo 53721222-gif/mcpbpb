@@ -281,12 +281,35 @@ class GameAPI:
                 time.sleep(0.4)
                 continue
             surv = ph.get("survival") or {}
+            if surv.get("just_started"):
+                # Survival confirmation animates for ~1s. Do not call
+                # skip_result during that transition; it can race with the
+                # native startSurvivalMode_continue path.
+                st = self.wait_for_shop_or_title(timeout=15.0)
+                return {"ok": True, "result": "survival_started", "state": st}
             if surv.get("prompt_visible"):
                 return {"ok": False, "error": "survival_choice_required",
                         "state": self.state()}
             if state == "combat":
                 saw_combat = True
                 if ph.get("can_skip_result"):
+                    wins = int(ph.get("current_run_wins", ph.get("wins", 0)) or 0)
+                    # The native survival prompt is shown ~1s after the result
+                    # screen.  Never auto-skip the 10th win before that prompt:
+                    # native skipRoundResult would see wins==MAX_WINS and call
+                    # endRun() (trophy settlement) before survival can start.
+                    if wins >= 10 and not bool(surv.get("survival_mode", False)):
+                        wait_prompt_until = time.time() + 2.0
+                        while time.time() < wait_prompt_until:
+                            ph2 = self.phase()
+                            surv2 = ph2.get("survival") or {}
+                            if surv2.get("prompt_visible"):
+                                return {"ok": False, "error": "survival_choice_required",
+                                        "state": self.state()}
+                            time.sleep(0.2)
+                        return {"ok": False, "error": "survival_choice_required",
+                                "state": self.state(),
+                                "detail": "10 wins: call bpb_enter_survival before skipping"}
                     if auto_skip:
                         skip = self.skip_result()
                         if not skip.get("ok"):

@@ -56,9 +56,9 @@
 | 旋转 | `bpb_rotate_item` | 游戏内原子旋转：removeItem→orientItem→addItemByTopLeft，绕过 drop/hotswap；目标需在包内且不重叠；`BPB_ROTATE=0` 关闭 |
 | 旋转 | `bpb_rotate_bag` | 游戏内原子旋转空背包；非空返回 `bag_not_empty`；`BPB_ROTATE=0` 关闭 |
 | 战斗 | `bpb_start_battle` | 开始战斗；开战前只规范化落格，不移走跨包物品 |
-| 战斗 | `bpb_wait_for_result` | 等待结算；自动跳过并回商店；10 胜提示会返回 `survival_choice_required` |
-| 战斗 | `bpb_skip_result` | 手动跳过结算；10 胜提示下被拦截，需先选择 |
-| 10胜 | `bpb_enter_survival` | 选择“进入生存模式” |
+| 战斗 | `bpb_wait_for_result` | 等待结算；自动跳过并回商店；十胜时不会先跳过，返回 `survival_choice_required` |
+| 战斗 | `bpb_skip_result` | 手动跳过结算；十胜提示出现前后都被拦截，需先选择 |
+| 10胜 | `bpb_enter_survival` | 选择“进入生存模式”；`can_start=true` 即可，原生提示延迟时会主动打开 |
 | 10胜 | `bpb_stop_here` | 选择“到此为止”（结束本轮，保留胜场） |
 | 10胜 | `bpb_choose_survival` | 统一选择：`choice=survival/stop` |
 | 开局 | `bpb_set_class` / `bpb_set_loadout` | 标题界面选择职业 / 初始 loadout |
@@ -75,7 +75,7 @@
 >
 > 标题界面先看 `state.title.classes[].loadouts`，用 `bpb_set_class` / `bpb_set_loadout` 选择，再 `bpb_start_run`。
 >
-> **10 胜提示**：`state.survival.prompt_visible=true` 时，用 `bpb_enter_survival` 或 `bpb_stop_here` 明确选择；`bpb_skip_result` / `bpb_wait_for_result` 会被拦截，不会替你选。
+> **10 胜提示**：原生提示有约 1 秒延迟；检测到 `wins=10` 且 `survival.can_start=true` 就应准备选择，不要先 `bpb_skip_result`。用 `bpb_enter_survival` 或 `bpb_stop_here` 明确选择；`bpb_skip_result` / `bpb_wait_for_result` 在提示出现前后都会被拦截，不会先结算奖杯。
 
 ---
 
@@ -263,19 +263,21 @@ python -m bpb_mcp.cli state
 
 ```text
 bpb_get_state
-  → state.survival.prompt_visible=true
-  → state.wins=10, state.total_wins=累计胜场
+  → state.wins=10, state.survival.was_max_wins=true
+  → state.survival.can_start=true（即使 prompt_visible 还在 1 秒延迟中）
+  → prompt_visible=true 时显示界面
 
 选择一：
-bpb_enter_survival          # 进入生存模式
+bpb_enter_survival          # 进入生存模式（不会先结算奖杯）
 或
 bpb_stop_here               # 到此为止
 或
 bpb_choose_survival {"choice":"survival"|"stop"}
 
 注意：
-bpb_skip_result / bpb_wait_for_result 在提示出现时返回 survival_choice_required，
-不会自动替你选择。
+bpb_skip_result / bpb_wait_for_result 在十胜提示出现前后都返回
+survival_choice_required；不会 auto-skip 到 endRun/奖杯结算。
+进入后 state.survival.just_started=true；等切回 shop 再进行下一回合。
 ```
 
 ---
@@ -455,7 +457,8 @@ bpb_skip_result / bpb_wait_for_result 在提示出现时返回 survival_choice_r
   - `can_start`：是否可选择进入生存；
   - `can_stop_here`：是否可选择到此为止；
   - `was_max_wins`：是否达到 10 胜上限；
-  - `survival_mode`：当前是否已在生存模式。
+  - `survival_mode`：当前是否已在生存模式；
+  - `just_started`：生存模式刚确认、仍在切回商店的过渡中；此时不要跳过结算。
 - `shop.items[].price`：当前价格（含折扣）；`on_sale` 表示是否打折。
 - `shop.choose_one`：当前是否为**五选一技能商店**（第 3/10 回合）。
 - `shop.items[].kind`：`item` 或 `skill`（技能商店时）。

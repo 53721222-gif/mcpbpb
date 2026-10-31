@@ -67,12 +67,12 @@ description: "通过本地 Backpack Battles MCP 连续游玩《背包乱斗》�
 ## 十胜、生存与结算
 
 - **以接口胜场为准。** `wins` 和 `current_run_wins` 都是本局胜场，`total_wins` 是累计胜场，不能用后者触发十胜流程。接手中途局也直接读取本局胜场，不再自行从零累加或通过回合、`tries`、`last_result` 推算。`last_result` 仅用于结果记录，不能当作当前战斗实时胜负。
-- **十次胜利后必须自动进入生存模式。** 每次状态或结算返回后，优先检查 `survival.prompt_visible`。当其为 `true` 且 `survival.can_start=true` 时调用 `bpb_enter_survival {}`；也可使用等价的 `bpb_choose_survival {"choice":"survival"}`，两者选一个，不连续重复选择。无需让用户再次确认。
+- **十次胜利后必须自动进入生存模式。** 每次状态或结算返回后，优先检查 `survival.can_start`；十胜时它可能比 `prompt_visible` 早约 1 秒变为 `true`。当 `can_start=true` 时直接调用 `bpb_enter_survival {}`（会主动打开延迟中的提示，不会先结算奖杯）；也可使用等价的 `bpb_choose_survival {"choice":"survival"}`，两者选一个，不连续重复选择。无需让用户再次确认。
 - **把选择请求当作流程分支。** `bpb_wait_for_result` / `bpb_skip_result` 返回 `error="survival_choice_required"`，或 `error="skip_failed"` 的 `detail.error` 为该值时，即使 `ok=false` / `isError=true` 也应进入上述生存选择流程，而非报告工具故障、等待人工处理或重开。先用返回的状态或 `bpb_get_phase` 确认提示；不能连续调用跳过来绕过选择。
 - **选择后验证继续本局。** `bpb_enter_survival` 成功返回的状态在 `phase` 中；随后重新读取 `bpb_get_phase`，确认 `survival.prompt_visible=false` 且 `survival.survival_mode=true`。转场未完成时有限等待；回到 `shop` 后再读完整状态继续购买。若仍在 `combat`，按实际 phase 等待或处理普通结算，不重复开战或新开一局。已在生存模式且没有提示时不要再次调用进入生存。
-- `wins` 达到十次但尚未显示提示时先观察结算推进，不提前调用生存选择；`survival.can_start` 短暂为假时等待并重读。`survival_mode` 才是已经进入生存的确认字段，不能仅凭 `wins`、`total_wins` 或 `survival.was_max_wins` 推断。出现 `survival_prompt_not_visible` 时也先读 phase，防止对已经成功的选择再次执行；持续无法进入时保留当前局并报告具体错误。
+- `wins` 达到十次但 `survival.can_start` 仍为假时等待并重读，不要先 `bpb_skip_result`；`can_start=true` 后立即进入，不要求 `prompt_visible` 已为真。`survival_mode` 才是已经进入生存的确认字段，不能仅凭 `wins`、`total_wins` 或 `survival.was_max_wins` 推断。进入后 `just_started=true` 时等切回 shop，不要 skip；出现 `survival_prompt_not_visible` 时先读 phase，若 `can_start=true` 可重试 `bpb_enter_survival`；持续无法进入时保留当前局并报告具体错误。
 - 本技能目标下禁止调用 `bpb_stop_here` 或 `bpb_choose_survival {"choice":"stop"}`。`survival.can_stop_here=true` 只表示该按钮可用，不是应该结束本局。`bpb_start_run` 的 `unranked/ranked` 仍只用于新局，不接受 `mode=survival`；不能用强制重开绕过十胜续局。
-- 战斗等待超时或返回成功但仍处于 `combat` 时，先读 `bpb_get_phase`，区分战斗未完、普通结算、商店转场与生存提示；不要只凭 `result="skipped"` 判断已经回到商店。仅在没有生存提示且 `can_skip_result=true` 时手动 `bpb_skip_result`；超时不等于死亡。
+- 战斗等待超时或返回成功但仍处于 `combat` 时，先读 `bpb_get_phase`，区分战斗未完、普通结算、商店转场与生存提示；不要只凭 `result="skipped"` 判断已经回到商店。仅在本局未到十胜、没有生存提示且 `can_skip_result=true` 时手动 `bpb_skip_result`；十胜前后都不要 skip，超时不等于死亡。
 - `tries` 是剩余重试次数，`hp` 是角色战斗生命；不能因为一场战斗生命变为零就认定整局死亡。以真实终局/返回标题/确认重试耗尽判断本局结束。
 
 ## 运行记录与停止
